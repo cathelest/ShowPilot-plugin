@@ -359,8 +359,9 @@ function sp_fpp_get_json($path) {
 // Every 15 s while the FPP Monitor is wanted, ask each FPP this one sees on
 // the show network for its /api/system/status, all at once (curl_multi) with
 // a 2 s limit, so the listener loop never waits long. Only private IPv4
-// addresses that MultiSync heard from in the last 5 minutes, at most 16.
-// Each answer is cut down to what ShowPilot shows: state, sequence, CPU,
+// addresses of FPP systems (player/remote), at most 16, one request per
+// address. A remote that doesn't answer is sent as null (ShowPilot shows it
+// offline). Each answer is cut down to what ShowPilot shows: state, sequence, CPU,
 // memory, sensors (temperatures), uptime and platform.
 $fppRemoteStatus = array();
 $fppRemoteStatusAt = 0;
@@ -415,8 +416,10 @@ function sp_fpp_remote_statuses($multisync, $now) {
         if (!sp_is_private_ipv4($ip) || isset($ips[$ip])) continue;
         // FPP systems only (controllers don't answer /api/system/status).
         $mode = isset($s['fppModeString']) ? strtolower((string)$s['fppModeString']) : '';
-        if (!in_array($mode, array('player', 'remote', 'master', 'bridge'), true)) continue;
-        if (isset($s['lastSeen']) && is_numeric($s['lastSeen']) && $now - $s['lastSeen'] > 300) continue;
+        // Not 'bridge': that's mostly controllers such as WLED.
+        if (!in_array($mode, array('player', 'remote', 'master'), true)) continue;
+        // No lastSeen filter: FPP only refreshes it now and then (20+ min old
+        // on a healthy show), so a remote that answers is simply online.
         $ips[$ip] = true;
         if (count($ips) >= 16) break;
     }
@@ -441,10 +444,8 @@ function sp_fpp_remote_statuses($multisync, $now) {
         } while ($running > 0);
         foreach ($hs as $ip => $ch) {
             $body = curl_multi_getcontent($ch);
-            if (curl_getinfo($ch, CURLINFO_HTTP_CODE) === 200 && is_string($body) && strlen($body) < 500000) {
-                $t = sp_trim_remote_status(json_decode($body, true));
-                if ($t !== null) $out[$ip] = $t;
-            }
+            $out[$ip] = (curl_getinfo($ch, CURLINFO_HTTP_CODE) === 200 && is_string($body) && strlen($body) < 500000)
+                ? sp_trim_remote_status(json_decode($body, true)) : null;
             curl_multi_remove_handle($mh, $ch);
             curl_close($ch);
         }
@@ -454,9 +455,7 @@ function sp_fpp_remote_statuses($multisync, $now) {
         $ctx = stream_context_create(array('http' => array('timeout' => 1, 'ignore_errors' => true, 'follow_location' => 0)));
         foreach (array_slice(array_keys($ips), 0, 4) as $ip) {
             $body = @file_get_contents('http://' . $ip . '/api/system/status', false, $ctx);
-            if ($body === false) continue;
-            $t = sp_trim_remote_status(json_decode($body, true));
-            if ($t !== null) $out[$ip] = $t;
+            $out[$ip] = $body === false ? null : sp_trim_remote_status(json_decode($body, true));
         }
     }
     $fppRemoteStatus = $out;
